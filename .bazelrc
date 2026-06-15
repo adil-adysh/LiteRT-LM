@@ -379,7 +379,7 @@ build:windows --spawn_strategy=local
 build:windows --host_copt=/Iexternal/com_google_protobuf/src
 
 # Use Git Bash for genrules
-build:windows --shell_executable="C:/Program Files/Git/bin/bash.exe"
+build:windows --shell_executable=C:/PROGRA~1/Git/bin/bash.exe
 
 # Verbose failure logs when something goes wrong
 build:windows --verbose_failures
