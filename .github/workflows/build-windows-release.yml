@@ -14,17 +14,15 @@
 #
 # =============================================================================
 #
-# Builds LiteRT-LM on Windows, packages into a release zip, and uploads it.
+# Builds LiteRT-LM litert_lm_main.exe on Windows, packages into a release
+# zip, and uploads it to GitHub Releases.
 #
-# This workflow mirrors the exact steps verified on a local Windows machine:
-#   1. Install prerequisites (Bazelisk, VS BuildTools, etc.)
-#   2. Build CPU + GPU binaries with Bazel
-#   3. Package with prebuilt DLLs (not Bazel-built symlinks)
-#   4. Download DirectX Shader Compiler for GPU support
-#   5. Create release zip with correct layout (DLLs alongside EXE)
-#   6. Upload to GitHub release
-#
-# Trigger: push tag v* or workflow_dispatch
+# Pre-installed on windows-2022 runner:
+#   - Visual Studio 2022 Enterprise (at C:\Program Files\...\Enterprise)
+#   - Bazelisk 1.28.1
+#   - Git for Windows (bash at C:\Program Files\Git\bin\bash.exe)
+#   - Python 3.x, Java 17+
+#   - Windows long paths already enabled
 # =============================================================================
 
 name: "Build Windows Release"
@@ -55,45 +53,43 @@ jobs:
       actions: write
       contents: write
     env:
-      # Bazel output base – use D: if available (faster I/O), else short C:\ path
-      BAZEL_OUTPUT_BASE: ${{ github.workspace[0] -eq 'D' && 'D:/w' || 'C:/w' }}-${{ github.sha }}
-      # VS BuildTools
-      BAZEL_VC: "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC"
-      # Git Bash – short (8.3) path avoids space-parsing bugs in Bazel
       BAZEL_SH: "C:\\PROGRA~1\\Git\\bin\\bash.exe"
-      # GitHub token for release upload
       GH_TOKEN: ${{ github.token }}
-      # Force re-download all deps on workflow_dispatch with REFRESH_CACHE=true
-      REFRESH_CACHE: ${{ github.event_name == 'schedule' ||
-                         (github.event_name == 'workflow_dispatch' && inputs.REFRESH_CACHE) }}
+      REFRESH_CACHE: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.REFRESH_CACHE) }}
 
     steps:
-      # -----------------------------------------------------------------------
-      # 1. CHECKOUT
-      # -----------------------------------------------------------------------
       - name: Checkout code.
         uses: actions/checkout@v4
         with:
           lfs: true
 
-      # -----------------------------------------------------------------------
-      # 2. INSTALL PREREQUISITES
-      # -----------------------------------------------------------------------
-      - name: Install Bazelisk.
-        run: winget install Bazel.Bazelisk -e --accept-source-agreements
-
-      - name: Detect MSVC version.
+      - name: Detect Visual Studio and MSVC version.
         id: msvc
         run: |
-          $msvcVer = Get-ChildItem "$env:BAZEL_VC\Tools\MSVC" `
+          $vcPaths = @(
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC",
+            "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC",
+            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC"
+          )
+          $foundVc = $null
+          foreach ($p in $vcPaths) {
+            if (Test-Path "$p\Tools\MSVC") {
+              $foundVc = $p
+              break
+            }
+          }
+          if (-not $foundVc) {
+            Write-Host "::error::No Visual Studio VC installation found!"
+            exit 1
+          }
+          echo "BAZEL_VC=$foundVc" >> "$env:GITHUB_ENV"
+          $msvcVer = Get-ChildItem "$foundVc\Tools\MSVC" `
             | Sort-Object Name -Descending `
             | Select-Object -First 1 -ExpandProperty Name
           echo "BAZEL_VC_FULL_VERSION=$msvcVer" >> "$env:GITHUB_ENV"
-          echo "MSVC version: $msvcVer"
+          Write-Host "VC root: $foundVc"
+          Write-Host "MSVC version: $msvcVer"
 
-      # -----------------------------------------------------------------------
-      # 3. CACHE SETUP
-      # -----------------------------------------------------------------------
       - name: Set up cache keys.
         id: cache-keys
         run: |
@@ -107,6 +103,14 @@ jobs:
           echo "CACHE_RESTORE_KEY_0=$CACHE_RESTORE_KEY_0" >> "$env:GITHUB_OUTPUT"
           echo "CACHE_RESTORE_KEY_HEAD=$CACHE_RESTORE_KEY_HEAD" >> "$env:GITHUB_OUTPUT"
           echo "CACHE_KEY=$CACHE_KEY" >> "$env:GITHUB_OUTPUT"
+
+      - name: Set Bazel output base.
+        id: bazel-output
+        run: |
+          if (Test-Path "D:\") { $base = "D:/w-${{ github.sha }}" }
+          else { $base = "C:/w-${{ github.sha }}" }
+          echo "BAZEL_OUTPUT_BASE=$base" >> "$env:GITHUB_ENV"
+          Write-Host "Output base: $base"
 
       - name: Clean build outputs if cache is being refreshed.
         if: env.REFRESH_CACHE == 'true'
@@ -127,9 +131,6 @@ jobs:
             ${{ steps.cache-keys.outputs.CACHE_RESTORE_KEY_1 }}-
             ${{ steps.cache-keys.outputs.CACHE_RESTORE_KEY_2 }}-
 
-      # -----------------------------------------------------------------------
-      # 4. BUILD — CPU (static monolithic)
-      # -----------------------------------------------------------------------
       - name: Build litert_lm_main (CPU, static).
         run: |
           bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
@@ -137,9 +138,6 @@ jobs:
             --deleted_packages=swift `
             //runtime/engine:litert_lm_main
 
-      # -----------------------------------------------------------------------
-      # 5. BUILD — GPU (dynamic linking)
-      # -----------------------------------------------------------------------
       - name: Build litert_lm_main (GPU, dynamic).
         run: |
           bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
@@ -148,118 +146,68 @@ jobs:
             --define=resolve_symbols_in_exec=false `
             //runtime/engine:litert_lm_main
 
-      # -----------------------------------------------------------------------
-      # 6. DOWNLOAD DirectX Shader Compiler (GPU support)
-      # -----------------------------------------------------------------------
       - name: Download DirectX Shader Compiler DLLs.
         run: |
           $dxcVersion = "1.9.2602"
           $dxcUrl = "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v$dxcVersion/dxc_2026_02_20.zip"
           $dxcZip = "$env:TEMP\dxc.zip"
           $targetDir = "bazel-bin\runtime\engine"
-
           Write-Host "Downloading DXC v$dxcVersion ..."
           curl.exe -L -o "$dxcZip" "$dxcUrl"
           Write-Host "Extracting dxil.dll and dxcompiler.dll ..."
-
-          # Extract only the DLLs we need from bin\x64\
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [System.IO.Compression.ZipFile]::OpenRead($dxcZip)
-          $entries = $zip.Entries | Where-Object {
-              $_.Name -in @("dxil.dll", "dxcompiler.dll") -and
-              $_.FullName -match "bin/x64"
-          }
+          $entries = $zip.Entries | Where-Object { $_.Name -in @("dxil.dll","dxcompiler.dll") -and $_.FullName -match "bin/x64" }
           foreach ($f in $entries) {
-              $dest = Join-Path $targetDir $f.Name
-              [System.IO.Compression.ZipFileExtensions]::ExtractToFile($f, $dest, $true)
-              Write-Host "  Extracted: $($f.Name)"
+            $dest = Join-Path $targetDir $f.Name
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($f, $dest, $true)
+            Write-Host "  Extracted: $($f.Name)"
           }
           $zip.Dispose()
           Remove-Item "$dxcZip" -Force
           Write-Host "DXC ready."
 
-      # -----------------------------------------------------------------------
-      # 7. PACKAGE RELEASE
-      # -----------------------------------------------------------------------
       - name: Package release zip.
         run: |
           $version = "${{ github.ref_name }}"
           $pkgDir = "LiteRT-LM-$version-Windows-x86_64"
           $binDir = "bazel-bin\runtime\engine"
           $prebuiltDir = "prebuilt\windows_x86_64"
-
           Write-Host "Creating package directory: $pkgDir"
           New-Item "$pkgDir\bin", "$pkgDir\models" -ItemType Directory -Force | Out-Null
-
-          # --- Binary (GPU-enabled build, from step 5) ---
           Copy-Item "$binDir\litert_lm_main.exe" "$pkgDir\bin\" -Force
-
-          # --- Prebuilt DLLs (NOT the Bazel-built symlinks — use repo copies) ---
-          # CRITICAL: The prebuilt libLiteRt.dll matches the WebGPU accelerator DLL.
-          # Using the Bazel-built libLiteRt.dll causes ABI mismatch crash (0xC0000005).
-          @(
-            "libLiteRt.dll",
-            "libLiteRtWebGpuAccelerator.dll",
-            "libLiteRtTopKWebGpuSampler.dll",
-            "libwebgpu_dawn.dll",
-            "libGemmaModelConstraintProvider.dll"
-          ) | ForEach-Object {
-              Copy-Item "$prebuiltDir\$_" "$pkgDir\bin\" -Force
-              Write-Host "  Prebuilt: $_"
+          foreach ($dll in @("libLiteRt.dll","libLiteRtWebGpuAccelerator.dll","libLiteRtTopKWebGpuSampler.dll","libwebgpu_dawn.dll","libGemmaModelConstraintProvider.dll")) {
+            Copy-Item "$prebuiltDir\$dll" "$pkgDir\bin\" -Force
           }
-
-          # --- DirectX Shader Compiler DLLs (for GPU shader compilation) ---
-          @("dxcompiler.dll", "dxil.dll") | ForEach-Object {
-              Copy-Item "$binDir\$_" "$pkgDir\bin\" -Force
-              Write-Host "  DXC: $_"
+          foreach ($dll in @("dxcompiler.dll","dxil.dll")) {
+            Copy-Item "$binDir\$dll" "$pkgDir\bin\" -Force
           }
-
-          # --- README ---
-          $readme = @"
-LiteRT-LM Windows Binary $version
-==================================
-Build: ${{ github.sha }}
-
-QUICK START
-  1. Place a .litertlm model file in the models/ folder
-  2. Open a terminal in this directory
-  3. Run with CPU:
-       .\bin\litert_lm_main.exe --model_path="models\model.litertlm" --backend=cpu
-  4. Run with GPU (NVIDIA):
-       .\bin\litert_lm_main.exe --model_path="models\model.litertlm" --backend=gpu
-
-CONTENTS
-  bin/litert_lm_main.exe           Main executable (17.6 MB)
-  bin/*.dll                        Runtime libraries (GPU, WebGPU, DXC)
-  models/                          Place .litertlm model files here
-
-BACKENDS
-  --backend=cpu   XNNPACK with AVX2 (24-core optimized)
-  --backend=gpu   NVIDIA GPU via WebGPU / Direct3D 12
-
-Download models: https://huggingface.co/litert-community
-"@
-          Set-Content "$pkgDir\README.txt" $readme -Encoding UTF8
-
-          # --- Model folder placeholder ---
-          Set-Content "$pkgDir\models\README.txt" @"
-Place .litertlm model files here.
-Download from: https://huggingface.co/litert-community
-"@ -Encoding UTF8
-
-          # --- Create zip ---
+          Set-Content "$pkgDir\models\README.txt" "Place .litertlm model files here. Download from: https://huggingface.co/litert-community" -Encoding UTF8
+          $readmeLines = @(
+            "========================================================",
+            "LiteRT-LM Windows Binary $version",
+            "========================================================",
+            "Build: ${{ github.sha }}",
+            "",
+            "QUICK START",
+            "  1. Place a .litertlm model file in the models/ folder",
+            '  2. Run: .\bin\litert_lm_main.exe --model_path="models\model.litertlm" --backend=cpu',
+            '  GPU: .\bin\litert_lm_main.exe --model_path="models\model.litertlm" --backend=gpu',
+            "",
+            "BACKENDS",
+            "  cpu  - XNNPACK with AVX2 (24-core optimized)",
+            "  gpu  - NVIDIA GPU via WebGPU / Direct3D 12",
+            "",
+            "Download models: https://huggingface.co/litert-community"
+          )
+          $readmeLines | Set-Content "$pkgDir\README.txt" -Encoding UTF8
           $zipFile = "$pkgDir.zip"
           Compress-Archive -Path "$pkgDir\*" -DestinationPath $zipFile -Force
           Write-Host "Release zip created: $zipFile"
           $z = Get-Item $zipFile
           Write-Host "Size: $([math]::Round($z.Length / 1MB, 1)) MB"
-
-          # Set output for release step
           echo "RELEASE_ZIP=$zipFile" >> "$env:GITHUB_ENV"
 
-      # -----------------------------------------------------------------------
-      # 8. SAVE CACHE
-      # -----------------------------------------------------------------------
       - name: Save Bazel cache.
         uses: actions/cache/save@v4
         if: env.REFRESH_CACHE == 'true' || steps.bazel-cache.outputs.cache-hit != 'true'
@@ -269,9 +217,6 @@ Download from: https://huggingface.co/litert-community
             ~/.cache/bazel-windows-dll
           key: ${{ steps.cache-keys.outputs.CACHE_KEY }}
 
-      # -----------------------------------------------------------------------
-      # 9. RELEASE
-      # -----------------------------------------------------------------------
       - name: Upload release asset.
         if: github.ref_type == 'tag'
         run: |
