@@ -56,6 +56,9 @@ jobs:
       BAZEL_SH: "C:\\PROGRA~1\\Git\\bin\\bash.exe"
       GH_TOKEN: ${{ github.token }}
       REFRESH_CACHE: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.REFRESH_CACHE) }}
+      # Clear ANDROID_NDK_HOME: windows-2022 runner has NDK pre-installed but
+      # Bazel's android_ndk_repository cannot create symlinks to it.
+      ANDROID_NDK_HOME:
 
     steps:
       - name: Checkout code.
