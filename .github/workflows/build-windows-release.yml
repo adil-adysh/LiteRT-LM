@@ -136,18 +136,41 @@ jobs:
 
       - name: Build litert_lm_main (CPU, static).
         run: |
-          bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
-            build --disk_cache=~/.cache/bazel-windows `
-            --deleted_packages=swift `
-            //runtime/engine:litert_lm_main
+          # Retry up to 3 times for transient download errors (e.g. zlib.net)
+          $attempt = 0
+          do {
+            $attempt++
+            Write-Host "Build attempt $attempt..."
+            bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
+              build --disk_cache=~/.cache/bazel-windows `
+              --deleted_packages=swift `
+              //runtime/engine:litert_lm_main
+            $success = $LASTEXITCODE -eq 0
+            if (-not $success -and $attempt -lt 3) {
+              Write-Host "::warning::Build failed (attempt $attempt). Retrying..."
+              Start-Sleep 10
+            }
+          } while (-not $success -and $attempt -lt 3)
+          if (-not $success) { exit 1 }
 
       - name: Build litert_lm_main (GPU, dynamic).
         run: |
-          bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
-            build --disk_cache=~/.cache/bazel-windows-dll `
-            --define=litert_link_capi_so=true `
-            --define=resolve_symbols_in_exec=false `
-            //runtime/engine:litert_lm_main
+          $attempt = 0
+          do {
+            $attempt++
+            Write-Host "Build attempt $attempt..."
+            bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
+              build --disk_cache=~/.cache/bazel-windows-dll `
+              --define=litert_link_capi_so=true `
+              --define=resolve_symbols_in_exec=false `
+              //runtime/engine:litert_lm_main
+            $success = $LASTEXITCODE -eq 0
+            if (-not $success -and $attempt -lt 3) {
+              Write-Host "::warning::Build failed (attempt $attempt). Retrying..."
+              Start-Sleep 10
+            }
+          } while (-not $success -and $attempt -lt 3)
+          if (-not $success) { exit 1 }
 
       - name: Download DirectX Shader Compiler DLLs.
         run: |
