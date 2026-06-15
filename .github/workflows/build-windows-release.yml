@@ -110,8 +110,9 @@ jobs:
       - name: Set Bazel output base.
         id: bazel-output
         run: |
-          if (Test-Path "D:\") { $base = "D:/w-${{ github.sha }}" }
-          else { $base = "C:/w-${{ github.sha }}" }
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          if (Test-Path "D:\") { $base = "D:/b/$shortSha" }
+          else { $base = "C:/b/$shortSha" }
           echo "BAZEL_OUTPUT_BASE=$base" >> "$env:GITHUB_ENV"
           Write-Host "Output base: $base"
 
