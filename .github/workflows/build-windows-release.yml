@@ -173,25 +173,24 @@ jobs:
           } while (-not $success -and $attempt -lt 3)
           if (-not $success) { exit 1 }
 
-      - name: Download DirectX Shader Compiler DLLs.
+      - name: Copy DirectX Shader Compiler DLLs (downloaded by Bazel).
         run: |
-          $dxcVersion = "1.9.2602"
-          $dxcUrl = "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v$dxcVersion/dxc_2026_02_20.zip"
-          $dxcZip = "$env:TEMP\dxc.zip"
+          # Bazel already downloads DXC as part of the GPU build (WORKSPACE
+          # references @directx_shader_compiler). We just need to copy the
+          # DLLs from the Bazel external cache to the binary output dir.
           $targetDir = "bazel-bin\runtime\engine"
-          Write-Host "Downloading DXC v$dxcVersion ..."
-          curl.exe -L -o "$dxcZip" "$dxcUrl"
-          Write-Host "Extracting dxil.dll and dxcompiler.dll ..."
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [System.IO.Compression.ZipFile]::OpenRead($dxcZip)
-          $entries = $zip.Entries | Where-Object { $_.Name -in @("dxil.dll","dxcompiler.dll") -and $_.FullName -match "bin/x64" }
-          foreach ($f in $entries) {
-            $dest = Join-Path $targetDir $f.Name
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($f, $dest, $true)
-            Write-Host "  Extracted: $($f.Name)"
+          $dxcDir = "$env:BAZEL_OUTPUT_BASE/external/directx_shader_compiler/bin/x64"
+          if (Test-Path "$dxcDir/dxcompiler.dll") {
+            Copy-Item "$dxcDir/dxcompiler.dll" "$targetDir/" -Force
+            Copy-Item "$dxcDir/dxil.dll" "$targetDir/" -Force
+            Write-Host "DXC copied from Bazel cache: $dxcDir"
+          } else {
+            Write-Host "::warning::DXC not found in Bazel cache. Building DXC target..."
+            bazel --output_base="$env:BAZEL_OUTPUT_BASE" `
+              build @directx_shader_compiler//:dxc_dlls
+            Copy-Item "bazel-bin/external/directx_shader_compiler/bin/x64/dxcompiler.dll" "$targetDir/" -Force
+            Copy-Item "bazel-bin/external/directx_shader_compiler/bin/x64/dxil.dll" "$targetDir/" -Force
           }
-          $zip.Dispose()
-          Remove-Item "$dxcZip" -Force
           Write-Host "DXC ready."
 
       - name: Package release zip.
